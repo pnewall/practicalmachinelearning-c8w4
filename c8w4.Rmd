@@ -1,0 +1,584 @@
+---
+title: "Course 8 Practical Machine Learning - Week 4 Assignment - Exercise Quality Assessment"
+author: "Peter Newall"
+date: "8/20/2019"
+output: 
+  html_document: 
+    keep_md: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# **Overview**
+This report describes the design and build of a predictive model based on some very detailed and granular data made available on the following web site - http://groupware.les.inf.puc-rio.br/har. The original dataset records sample exercise activity of a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behaviour, or because they are tech geeks. 
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. The activity here is a dumbell biceps curl. Given a fresh subset of values for the 159 predictors available, the model is designed to predict where that subset or testing dataset fits in terms of the 5 classes that indicate how well the curl was done, namely 
+
+* A - exactly according to the specification 
+* B - throwing the elbows to the front 
+* C - lifting the dumbbell only halfway
+* D - lowering the dumbbell only halfway
+* E - throwing the hips to the front
+
+As such, it is clear that this is a classification requirement where the outcome of the model is one of the 5 classes above, rather than a number or a binary outcome e.g Yes or No, True or False.
+
+The Groupware Archive has kindly published the report from the original study into the exercise activity data. The report is entitled "Qualitative Activity Recognition of Weight Lifting Exercises" and is very focused on qualitative assessment and mistake detection for a given exercise. The report is not focused on the study participants in terms of assessing who might have done an exercise better than others. So the assumption is made here that the first 7 data items in the training dataset should not be included in any model as they are effectively circumstantial rather than statistical evidence. These data items are
+
+* X (a technical id, but sometimes preserved to help with data joins etc)
+* user_name (which of the 6 participants performed the activity)
+* raw_timestamp_part_1
+* raw_timestamp_part_2
+* cvtd_timestamp
+* new_window (refers to the instrumentation used to measure the activities)
+* num_window (refers to the instrumentation used to measure the activities)
+
+
+```{r setup, include = FALSE, knitr.table.format = "html", cache = FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+
+# Start by ensuring necessary packages available
+
+if (!"nortest" %in% installed.packages()) {
+  install.packages("nortest")
+}
+library(nortest)
+
+if (!"kableExtra" %in% installed.packages()) {
+  install.packages("kableExtra")
+}
+library(kableExtra)
+
+if (!"caret" %in% installed.packages()) {
+  install.packages("caret")
+}
+library(caret)
+
+if (!"dplyr" %in% installed.packages()) {
+  install.packages("dplyr")
+}
+library(dplyr)
+
+if (!"tidyr" %in% installed.packages()) {
+  install.packages("dplyr")
+}
+library(tidyr)
+
+if (!"ggplot2" %in% installed.packages()) {
+  install.packages("ggplot2")
+}
+library(ggplot2)
+
+if (!"imputeTS" %in% installed.packages()) {
+  install.packages("imputeTS")
+}
+library(imputeTS)
+
+if (!"rattle" %in% installed.packages()) {
+  install.packages("rattle")
+}
+library(rattle)
+
+if (!"rpart" %in% installed.packages()) {
+  install.packages("rpart")
+}
+library(rpart)
+
+if (!"xtable" %in% installed.packages()) {
+  install.packages("xtable")
+}
+library(xtable)
+
+if (!"knitLatex" %in% installed.packages()) {
+  install.packages("knitLatex")
+}
+library(knitLatex)
+
+if (!"ada" %in% installed.packages()) {
+  install.packages("ada")
+}
+library(ada)
+
+if (!"rbenchmark" %in% installed.packages()) {
+  install.packages("rbenchmark")
+}
+library(rbenchmark)
+
+if (!"tables" %in% installed.packages()) {
+  install.packages("tables")
+}
+library(tables)
+
+if (!"mlbench" %in% installed.packages()) {
+  install.packages("mlbench")
+}
+library(mlbench)
+
+if (!"randomForest" %in% installed.packages()) {
+  install.packages("randomForest")
+}
+library(randomForest)
+
+if (!"ggRandomForests" %in% installed.packages()) {
+  install.packages("ggRandomForests")
+}
+library(ggRandomForests)
+
+if (!"gbm" %in% installed.packages()) {
+  install.packages("gbm")
+}
+library(gbm)
+
+if (!"cvAUC" %in% installed.packages()) {
+  install.packages("cvAUC")
+}
+library(cvAUC)
+
+```
+
+
+## **Part 1 - Building the Model**
+
+### ***1.1  Training Dataset Characteristics***
+The original training dataset comprises 19,622 rows and 160 variables, one of which is the outcome field (classe) whilst the others can be considered predictors. The number of predictor variables reduces to 152 once the outcome field and the 7 circumstantial fields above are removed.  There is a marked characteristic of these predictors which has a bearing on the choice and effectiveness of prediction method (aka algorithm).
+
+This characteristic is illustrated in the chart below, which shows that there are two broad groups of variables, one where the variables hold values in most of the 19,622 rows, the other where the variables hold values for less than 5% of the total rows. The former appear as the dots towards the top of the chart, the latter as the dots close to 0 on the y-axis.
+
+There are 53 variables which are fully populated or close to it. There are 100 variables which hold less than 500 values in all and so can only be weak predictors of the outcome.
+
+
+```{r read, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE}
+
+#
+# Read the input file but do not want any of character 
+# fields apart from classe to be loaded into R as factors
+#
+
+fileName <- "./pml-training.csv"
+
+if(!file.exists(fileName) | !exists("training")) {
+    training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", stringsAsFactors = FALSE)
+}
+
+#
+# The call to mutate_if below will generate warnings re NAs introduced by 
+# coercion but this is OK as none of the candidate prediction methods work 
+# well with large numbers of NA's.
+# 
+# Exclude the first 7 fields from the mutate_if subset because we want to 
+# preserve user_name & date fields.
+#
+
+training_nochrs <- training %>% select(1, 8:159) %>% mutate_if(is.character, as.numeric)
+training_noblanks <- training_nochrs %>% replace(., is.na(.), 0)
+
+#
+# Have to convert classe to be the only factor field in the training dataset
+#
+
+training_classe <- training %>% select(1, 160)
+training_classe$classe <- as.factor(training_classe$classe)
+training_nonas <- merge(training_noblanks, training_classe)
+training_nonas <- training_nonas %>% select(-X)
+
+#
+# Work out the shape of the data
+#
+
+tbl_train <- as.data.frame(colSums(training_nonas != 0))
+colnames(tbl_train) <- "rows"
+tbl_pop <- cbind.data.frame(colnames(training_nonas), tbl_train$rows, (tbl_train$rows * 100)/dim(training_nonas)[1])
+colnames(tbl_pop) <- c("field", "rows", "ppop")
+tbl_pop <- tbl_pop %>% mutate(field_nr = as.numeric(field))
+
+#
+# ggplot to show there are two v distinct groups of fields in terms of 
+# how populated they are - one near 100%, the other less than 5%
+#
+
+pop_plot <- ggplot(data = tbl_pop, aes(x = field_nr, y = rows, colour = field)) +
+    geom_point(show.legend = FALSE) + ggtitle("Nr of Rows Populated by Field", 
+    subtitle = "(Maximum Possible is 19622)") +
+    theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5)) + 
+    scale_x_continuous(name = "Field Nr", limits=c(0, 170)) + 
+    scale_y_continuous(name = "Nr of Rows", limits=c(0, 20000))
+
+pop_plot
+```
+
+
+### ***1.2  Transforming the Original Data***
+Even before an informed decision can be made on a suitable prediction method to use, care has to be taken when reading the original csv data into an R dataset. The parameter "stringsAsFactors = FALSE" should be used otherwise R will convert to factors any fields it considers to be strings in the original csv.
+
+In the case of the weak predictor fields, the missing values will then be treated as NA's. The result of this is at best that a prediction method will return multiple warning messages and an inaccurate model, at worst that it will not run at all.
+
+The parameter above ensures that any string fields in the original csv are treated as character fields rather than factors in R and so any missing values do not automatically create NA's. This still leaves the question of what to do with those missing values in the character fields created for them in R, given that nearly all of the populated string fields in the csv actually hold numbers.
+
+The character fields in R must first be converted to numerics, which then allows the missing values to be treated as zeroes. Prediction methods may again raise warning messages when they see large numbers of zero values but they are much less likely to fail than if they see large numbers of NA's and some of them also offer intelligent ways of dealing with significant numbers of weak predictors.
+
+Another possible approach here might have been to impute the missing values, but given that the percentage of missing values for 100 of the 160 variables was over 95%, this approach appeared more likely to distort or even drown the signal in the orignal data and so was not used.
+
+
+```{r setup_cv, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE}
+
+#
+# Generate new training & validation datasets but first equalise the proportions 
+# of each classe in the original dataset so as not to bias model towards outcome A
+#
+
+training_nonas_ds <- as.data.frame(downSample(x = training_nonas, y = training_nonas$classe))
+
+#
+# Down-sampling adds a new field called Class, so remove it
+#
+
+training_nonas_ds <- training_nonas_ds %>% select(-Class)
+
+tbl_training_nonas <- table(training_nonas$classe)
+tbl_props_training_nonas <- cbind(tbl_training_nonas, prop.table(tbl_training_nonas) * 100)
+  
+tbl_training_nonas_ds <- table(training_nonas_ds$classe)
+tbl_props_training_nonas_ds <- cbind(tbl_training_nonas_ds, prop.table(tbl_training_nonas_ds) * 100)
+
+train_valid_idx <- createDataPartition(y = training_nonas_ds$classe, times = 1, p = 0.75, list = FALSE)
+train_train <- training_nonas_ds[train_valid_idx, ]
+valid_train <- training_nonas_ds[-train_valid_idx, ]
+
+tbl_train_train <- table(train_train$classe)
+tbl_props_train_train <- cbind(tbl_train_train, prop.table(tbl_train_train) * 100)
+
+tbl_valid_train <- table(valid_train$classe)
+tbl_props_valid_train <- cbind(tbl_valid_train, prop.table(tbl_valid_train) * 100)
+
+tbl_all_props <- cbind(tbl_training_nonas, prop.table(tbl_training_nonas) * 100,
+                       tbl_training_nonas_ds, prop.table(tbl_training_nonas_ds) * 100,
+                       tbl_train_train, prop.table(tbl_train_train) * 100,
+                       tbl_valid_train, prop.table(tbl_valid_train) * 100)
+
+colnames(tbl_all_props) <- c("Rows", "Percentage", "Rows", "Percentage", "Rows", "Percentage", "Rows", "Percentage")
+
+```
+
+
+## **Part 2 - Cross-Validation**
+
+### ***2.1  Set up and check new training and validation datasets***
+If the use case for the exercise activity data is primarily to help coach the enthusiasts when they do an exercise incorrectly, then the prediction model will deliver more value when the outcome class is not A. In those situations where the outcome class is A, then the prediction is that the enthusiast will do the exercise perfectly and little or no coaching is necessary.
+
+It seems reasonable then to work with a training dataset where there are equal proportions of all the outcome classes. As shown in the table below, this is not the case with the original training dataset, which is imbalanced towards A to the tune of 28%, whilst the other classes vary between 16% and 19.5%. 
+
+So, before using the original training dataset to generate new training and validation datasets, we will first resample - or more accurately - down-sample it to return equal proportions of all the outcome classes. The table as a whole then shows the results of pre-processing the original training dataset to set up new training and validation datasets with equal proportions of the outcome classe.
+
+
+```{r train_valid, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE}
+
+kable(tbl_all_props) %>%
+    kable_styling("striped") %>%
+    add_header_above(c("classe" = 1, "Original Training" = 2, "Down-sampled Training" = 2, "New Training" = 2, "Validation" = 2))
+
+#
+# Try Decision Tree
+#
+
+set.seed(2635)
+
+b1 <-benchmark("Caret Decision Tree" = {
+        dectree_mod <- train(classe ~ ., method = "rpart", data = train_train)
+    },
+    replications = 1,
+    columns = c("test", "elapsed", "relative", 
+        "user.self", "sys.self"))
+
+bm1 <- b1$elapsed/60
+a1 <- max(dectree_mod$results$Accuracy)
+dectree_pred <- predict(dectree_mod, newdata = valid_train)
+
+#
+# Results are mixed
+#
+
+dectree_pred_cf <- confusionMatrix(dectree_pred, valid_train$classe)
+
+#
+# Try Naive Bayes - training takes a long time, struggling with predictors?
+#
+
+set.seed(2635)
+b2 <- benchmark("Caret Naive Bayes" = {
+        nb_mod <- train(classe ~ ., method = "nb", data = train_train)
+    },
+    replications = 1,
+    columns = c("test", "elapsed", "relative", 
+        "user.self", "sys.self"))
+
+bm2 <- b2$elapsed/60
+a2 <- max(nb_mod$results$Accuracy)
+nb_pred <- predict(nb_mod, newdata = valid_train)
+
+#
+# NB model claims accuracy of 0.4700318, prediction 0.4621
+#
+
+nb_pred_cf <- confusionMatrix(nb_pred, valid_train$classe)
+
+#
+# Try Random Forest - training takes a long time 
+#
+
+set.seed(2635)
+b3 <- benchmark("Caret Random Forest" = {
+        rf_mod <- train(classe ~ ., method = "rf", data = train_train)
+    },
+    replications = 1,
+    columns = c("test", "elapsed", "relative", 
+        "user.self", "sys.self"))
+
+bm3 <- b3$elapsed/60
+a3 <- max(rf_mod$results$Accuracy)
+rf_pred <- predict(rf_mod, newdata = valid_train)
+
+#
+# RF model over-fitted?
+#
+
+rf_pred_cf <- confusionMatrix(rf_pred, valid_train$classe)
+
+#
+# Try GBM
+# 
+
+set.seed(2635)
+b4 <- benchmark("Caret Generalised Boosting" = {
+        gbm_mod <- train(classe ~ ., method = "gbm", data = train_train, verbose = FALSE)
+    },
+    replications = 1,
+    columns = c("test", "elapsed", "relative", 
+        "user.self", "sys.self"))
+
+bm4 <- b4$elapsed/60
+a4 <- max(gbm_mod$results$Accuracy)
+gbm_pred <- predict(gbm_mod, newdata = valid_train)
+
+#
+# GBM model & prediction
+#
+
+gbm_pred_cf <- confusionMatrix(gbm_pred, valid_train$classe)
+
+```
+
+
+### ***2.2  Prediction Methods Tested***
+Four prediction methods with classification capability were tested as a first-pass investigation into the best model to use. Key figures and confusion tables for all of these are shown below.
+
+Both Decision Trees and Naive Bayes delivered suspect prediction accuracies -  less than 0.5 for the former and NaN for the latter. It appears that both methods were not suited to the missing values and weakness of many of the predictors in the dataset. The levels of confusion for these two are reflected in the numbers that appear outside the top left to bottom right diagonal in their confusion matrices.
+
+The other two prediction methods tested were Random Forest and Boosting. The former returned an accuracy of `r max(rf_mod$results$Accuracy)` and the latter `r max(gbm_mod$results$Accuracy)`, as well as the very symmetrical confusion matrices below. These may be an indication of over-fitting.
+
+How both models were cross-validated, tuned and tested for over-fitting is covered in the next sections. Also, the decision was made to proceed with the dedicated R packages for Random Forest and Generalized Boosting as the train functions in these ran significantly quicker than those in the Caret package and provided slightly more options for tuning.
+
+
+##### First-Pass Model Key Figures and Confusion Matrices (run via caret package) #####
+
+```{r kables, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE, results = 'asis'}
+
+#
+# Output via kable
+#
+
+h1 <- as.data.frame(cbind("Decision Trees", " Accuracy: ", round(a1, 2), " Run Time: ", round(bm1, 2), " mins"), stringsAsFactors = FALSE)
+h1 <- rbind(h1, c("Naive Bayes", " Accuracy: ", round(a2, 2), " Run Time: ", round(bm2, 2), " mins"))
+h1 <- rbind(h1, c("Random Forest", " Accuracy: ", round(a3, 2), " Run Time: ", round(bm3, 2), " mins"))
+h1 <- rbind(h1, c("Boosting", " Accuracy: ", round(a4, 2), " Run Time: ", round(bm4, 2), " mins"))
+
+h1 %>% kable("html", align = "clc", col.names = NULL) %>%
+    kable_styling("striped", full_width = T, position = "center") 
+
+t1 <- dectree_pred_cf$table %>% kable("html", align = "clc", caption = "Decision Trees") %>%
+    kable_styling("striped", full_width = F, position = "center")
+
+t2 <- nb_pred_cf$table %>% kable("html", align = "clc", caption = "Naive Bayes") %>%
+    kable_styling("striped", full_width = F, position = "center")
+
+t3 <- rf_pred_cf$table %>% kable("html", align = "clc", caption = "Random Forest") %>%
+    kable_styling("striped", full_width = F, position = "center")
+
+t4 <- gbm_pred_cf$table %>% kable("html", align = "clc", caption = "Boosting") %>%
+    kable_styling("striped", full_width = F, position = "center")
+
+cat(c('<center><table><tr valign="top"><td>', t1, '</td><td>"     "</td><td>', t2, '</td><td>"     "</td><td>', t3, '</td><td>"     "</td><td>', t4, '</td></tr></table></center>'), sep = '')
+
+```
+
+
+## **Part 3 - Refining and Tuning the Models**
+
+### ***3.1  Random Forest - Variable Importance & thinning the Training Dataset***
+A potential risk with the training dataset here and its two distinct tiers of strong and weak predictors is that a prediction method fits its model with too much emphasis on the weak predictors. The end result is a prediction model that performs poorly for any dataset other than the training dataset itself.
+
+An analysis of variable importance would help to highlight which predictors are the strongest and which are so weak that they have little or no bearing on the classe outcome and so could be removed as a way of making the training set - and any model derived from it - more generalised.
+
+
+```{r varimpo, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE}
+
+#
+# Use rfcv for random forest cross-validation & feature reduction but first convert 
+# character fields to factors as randomForest() functions does not like chars
+#
+
+set.seed(2635)
+train_train_asfactor <- train_train %>% mutate_if(is.character, as.factor)
+rfcv_out <- rfcv(train_train_asfactor[, -153], train_train_asfactor[, 153], cv.fold = 5, scale = "log", step = 0.75)
+
+```
+
+
+The function for Random Forest cross-validation and feature selection returns the cross-validation error for decreasing numbers of predictors as follows:
+
+For `r attributes(rfcv_out$error.cv)$names[1]` fields, the error is `r rfcv_out$error.cv[1]`.
+
+For `r attributes(rfcv_out$error.cv)$names[6]` fields, the error is `r rfcv_out$error.cv[6]`.
+
+For `r attributes(rfcv_out$error.cv)$names[7]` fields, the error is `r rfcv_out$error.cv[7]`.
+
+From these figures it appears feasible to remove certain predictors without significantly affecting the accuracy of the model. The chart below makes clear the gap in terms of Mean Decrease in Accuracy between one set of fields at or above 20 on the y-axis and the other barely above 0. 
+
+A revised and thinner training dataset was produced by removing those fields with a Mean Decrease in Accuracy close to 0. This new training dataset was then used to refine the prediction model for Random Forest.
+
+
+```{r rfimpo, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE}
+
+set.seed(2635)
+
+b5 <- benchmark("Dedicated Random Forest" = {
+        rf_object <- randomForest(classe ~ ., data = train_train_asfactor, ntree = 500, importance = TRUE)
+    },
+    replications = 1,
+    columns = c("test", "elapsed", "relative", 
+        "user.self", "sys.self"))
+
+#
+# Mutate to absolute values
+#
+
+impo_df <- as.data.frame(importance(rf_object))
+impo_df <- cbind(names = rownames(impo_df), impo_df)
+impo_df <- impo_df %>% select(names, MeanDecreaseAccuracy) %>%
+    mutate(MeanDecreaseAccuracy = abs(MeanDecreaseAccuracy)) %>%
+    mutate(field_nr = row_number())
+
+#
+# Chart the Importance Gap
+#
+
+gap_plot <- ggplot(data = impo_df, aes(x = field_nr, y = MeanDecreaseAccuracy, colour = names)) +
+    geom_point(show.legend = FALSE) + 
+    ggtitle("Importance Gap by Field") +
+    theme(plot.title = element_text(hjust = 0.5))
+
+gap_plot
+
+#
+# So what fields to remove?
+#
+
+remove_list <- as.list(impo_df %>% filter(MeanDecreaseAccuracy < 10) %>% select(names))
+remove_list <- as.character(remove_list$names)
+thin_train <- train_train_asfactor %>% select(-one_of(remove_list))
+
+valid_train_asfactor <- valid_train %>% mutate_if(is.character, as.factor)
+thin_valid <- valid_train_asfactor %>% select(-one_of(remove_list))
+
+#
+# New RF model
+#
+
+set.seed(2635)
+rf_thin_mod <- randomForest(classe ~ ., data = thin_train, ntree = 10)
+rf_thin_pred <- predict(rf_thin_mod, thin_valid, type = "class")
+rf_thin_pred_cf <- confusionMatrix(rf_thin_pred, thin_valid$classe)
+
+```
+
+
+### ***3.2  Boosting - Cross Validation and Parameter Tuning***
+There are more tuning parameters available for a Boosting method than for Random Forest, among them number of trees, depth of trees and learning rate. The first-pass caret-based boosting model used the values n.trees = 150, interaction.depth = 3, shrinkage = 0.1 and n.minobsinnode = 10.
+
+The decision was made to take the values and run them through a 10-fold cross-validation on the new thin training dataset. The confusion table below shows a new set of results for the Boosting method predictions against the thin validation dataset whilst the chart shows that, with the number of trees at 150, we are close to optimal performance of the model.
+
+
+```{r gbmcv, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE}
+
+gbm_thin_mod <- gbm(classe ~ ., data = thin_train, distribution = "multinomial", 
+    interaction.depth = 3, cv.folds = 10, n.trees = 150, shrinkage = 0.1)
+
+gbm_thin_pred <- predict(gbm_thin_mod, thin_valid, type = "response")
+
+#
+# Extract values for then output confusion matrix
+#
+
+labels <- colnames(gbm_thin_pred)[apply(gbm_thin_pred, 1, which.max)]
+gbm_tune_pred_cf <- confusionMatrix(as.factor(labels), thin_valid$classe)
+gbm_tune_pred_cf$table %>% kable("html", align = "clc", caption = "Revised Confusion Matrix") %>%
+    kable_styling("striped", full_width = F, position = "float_left")
+
+gbm_thin_perf <- gbm.perf(gbm_thin_mod, method = "cv")
+
+```
+
+
+## **Part 4 - Out of Sample Error**
+
+### ***4.1  Final Prediction Test - Random Forest vs Boosting***
+
+The final prediction test is to transform the data in the original testing dataset in exactly the same way as the original training dataset and then predict the values of the classe variable from this. 
+
+At this stage, we have two tuned prediction models, one a Random Forest, the other a Boosting model. As the testing data does not hold any reference values for the classe outcome variable, we can run the tests for both and then build a confusion matrix which compares the results of each method. Whichever method shows the least confusion will be considered the better of the two.
+
+The confusion matrix on the left below does however show that the two models are in perfect agreement for their predictions on the testing dataset.
+
+So we can choose either method to publish the predictions. The table on the right below shows the predicted value from the Random Forest model of the classe variable for each of the 20 problem ids in the testing dataset.
+
+```{r finalt, fig.align = 'center', echo = FALSE, warning = FALSE, cache = TRUE, results = 'asis'}
+
+fileName <- "./pml-testing.csv"
+
+if(!file.exists(fileName) | !exists("testing")) {
+    testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", stringsAsFactors = FALSE)
+}
+
+#
+# The call to mutate_if below will generate warnings re NAs introduced by 
+# coercion but this is OK as none of the candidate prediction methods work 
+# well with large numbers of NA's.
+# 
+
+testing_nochrs <- testing %>% select(8:160) %>% mutate_if(is.character, as.numeric)
+testing_noblanks <- testing_nochrs %>% replace(., is.na(.), 0)
+
+thin_testing <- testing_noblanks %>% mutate_if(is.character, as.factor) %>%
+    select(-one_of(remove_list))
+
+rf_final_pred <- predict(rf_thin_mod, thin_testing, type = "class")
+gbm_final_pred <- predict(gbm_thin_mod, thin_testing, type = "response")
+
+#
+# Extract values for then output confusion matrix & predictions vs problem_id
+#
+
+labels <- colnames(gbm_final_pred)[apply(gbm_final_pred, 1, which.max)]
+rf_gbm_table <- table(rf_final_pred, labels)
+final_table <- table(rf_final_pred, testing$problem_id)
+
+t5 <- rf_gbm_table %>% 
+    kable("html", align = "clc", caption = "RF (x) vs Boosting (y)") %>%
+    kable_styling("striped", full_width = F, position = "float_left")
+
+t6 <- final_table %>% 
+    kable("html", align = "clc", caption = "Random Forest predictions for each problem_id in Testing Dataset") %>%
+    kable_styling("striped", full_width = F, position = "float_right")
+
+cat(c('<center><table><tr valign="top"><td>', t5, '</td><td>     </td><td>', t6, '</td></tr></table></center>'), sep = '')
+
+```
